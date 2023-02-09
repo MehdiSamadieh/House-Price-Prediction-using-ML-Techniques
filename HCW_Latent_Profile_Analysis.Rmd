@@ -1,0 +1,226 @@
+---
+title: "COVID HCW Data - Latent Profile Analysis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r initialize, echo=FALSE, message=FALSE, warning=FALSE}
+### Loading Libraries
+# loading libraries to use functions for script
+
+library(summarytools)
+library(tidyverse)
+library(reactable)
+library(knitr)
+library(car)
+library(tidyLPA)
+
+library("corrplot")
+library("lavaan")
+library("semTools")
+
+# show the code in the html output for all chunks 
+# unless explicitly excepted.
+
+knitr::opts_chunk$set(
+   echo = TRUE,
+   message = FALSE,
+   warning = FALSE)
+```
+
+## Preprocessing
+
+### Read HCW longitudinal data
+```{r}
+rm(list=ls())
+
+hcwData <- read.csv("HCW_timepoints_merged.csv", header = TRUE, na.strings=c("","NA"))
+nrow(hcwData)
+```
+
+
+### Create a unique id and assign to each participant
+```{r}
+hcwData<-hcwData%>%
+  mutate(ID=1:n())%>%
+  select(ID, everything())
+
+#check for duplicates
+hcwData$ID[duplicated(hcwData$ID)]
+```
+
+### Filter baseline data 
+```{r}
+#keep the baseline timepoint
+
+hcwData<-hcwData %>% filter(redcap_event_name == "m0_arm_1")
+```
+### Mode function
+```{r}
+# define mode function
+ModeFunc <- function(x, na.rm = FALSE) {
+  if(na.rm){
+    x = x[!is.na(x)]
+  }
+  ux <- unique(x)
+  return(ux[which.max(tabulate(match(x, ux)))])
+}
+```
+
+### Scale total calculation
+
+### Moral Injury Outcome Scale (MIOS)
+
+```{r MIOS}
+
+
+#The total score range (14 items) is 0-56 for the total score and 0-28 for each of the two subscales (each of 7 items).
+
+
+#### Shame subscale
+colnmsShame = c("moi_mat_3", "moi_mat_8", "moi_mat_16", "moi_mat_18", "moi_mat_29", "moi_mat_32", "moi_mat_34")
+
+#Calculate percent missing by dividing the number of NA cells by total cells, multiply by 100 and lastly round
+
+hcwData<- hcwData %>% rowwise() %>%
+  mutate(MIOSshame_perc_missing= round(((sum(is.na(c_across(all_of(colnmsShame))))/7)*100),2))
+
+#calculate the mode of each row for the MIOS Shame items
+hcwData$MIOSshame_rowMode<- apply(hcwData[,colnmsShame], 1, FUN = function(x) ModeFunc(na.omit(x)))
+
+#impute missing values rowwise with rowmode for participants having less than 20% missing, then calculate scale total
+hcwData$MIOSshame_score<-NA
+colnmsShame_plus<-c("ID", colnmsShame , "MIOSshame_perc_missing", "MIOSshame_rowMode")
+MIOSshame_temp<-hcwData[,colnmsShame_plus]
+
+MIOSshame_temp <- MIOSshame_temp %>% filter(MIOSshame_perc_missing<=20) %>% rowwise() %>%
+  mutate_at(vars(all_of(colnmsShame)), ~replace(., is.na(.), MIOSshame_rowMode))%>% 
+  mutate(MIOSshame_score = mean(c_across(all_of(colnmsShame))))
+
+hcwData$MIOSshame_score[match(MIOSshame_temp$ID, hcwData$ID)] <- MIOSshame_temp$MIOSshame_score
+#test the results
+# test_MIOSShame<- hcwData %>% select(colnmsShame, MIOSshame_perc_missing, MIOSshame_rowMode, MIOSshame_score)
+
+
+#### Trust-violation subscale
+
+colnmsTrust = c("moi_mat_5", "moi_mat_6", "moi_mat_12", "moi_mat_14", "moi_mat_15", "moi_mat_20", "moi_mat_22")
+
+#Calculate percent missing by dividing the number of NA cells by total cells, multiply by 100 and lastly round
+
+hcwData<- hcwData %>% rowwise() %>%
+  mutate(MIOStrust_perc_missing= round(((sum(is.na(c_across(all_of(colnmsTrust))))/7)*100),2))
+
+#calculate the mode of each row for the MIOS Trust Violation-related items
+hcwData$MIOStrust_rowMode<- apply(hcwData[,colnmsTrust], 1, FUN = function(x) ModeFunc(na.omit(x)))
+
+#impute missing values rowwise with rowmode for participants having less than 20% missing, then calculate scale total
+hcwData$MIOStrust_score<-NA
+colnmsTrust_plus<-c("ID", colnmsTrust , "MIOStrust_perc_missing", "MIOStrust_rowMode")
+MIOStrust_temp<-hcwData[,colnmsTrust_plus]
+
+
+MIOStrust_temp <- MIOStrust_temp %>% filter(MIOStrust_perc_missing<=20) %>% rowwise() %>%
+  mutate_at(vars(all_of(colnmsTrust)), ~replace(., is.na(.), MIOStrust_rowMode))%>% 
+  mutate(MIOStrust_score = mean(c_across(all_of(colnmsTrust))))
+
+hcwData$MIOStrust_score[match(MIOStrust_temp$ID, hcwData$ID)] <- MIOStrust_temp$MIOStrust_score
+
+#test the results
+# test_MIOStrust<- hcwData %>% select(colnmsTrust, MIOStrust_perc_missing, MIOStrust_rowMode, MIOStrust_score)
+#### MIOS Total Score
+
+colnms_mios_14item = c(colnmsShame, colnmsTrust)
+
+##mios_total_score
+#Calculate percent missing by dividing the number of NA cells by total cells, multiply by 100 and lastly round.
+hcwData$mios_perc_missing <- round((rowSums(is.na(hcwData[,colnms_mios_14item]))/14)*100, 2)
+
+#calculate the mode of each row for the mios items (14 items)
+hcwData$mios_rowMode<- apply(hcwData[,colnms_mios_14item], 1, FUN = function(x) ModeFunc(na.omit(x)))
+
+#impute missing values rowwise with rowmode for participants having less than 20% missing, then calculate scale total
+
+hcwData$mios_score<-NA
+colnms_mios_14item_plus<-c("ID", "record_id", colnms_mios_14item , "mios_perc_missing", "mios_rowMode")
+mios_temp<-hcwData[,colnms_mios_14item_plus]
+
+mios_temp <- mios_temp %>% filter(mios_perc_missing<=20) %>% rowwise() %>%
+  mutate_at(vars(all_of(colnms_mios_14item)), ~replace(., is.na(.), mios_rowMode))%>% 
+  mutate(mios_score = sum(c_across(all_of(colnms_mios_14item))))
+
+hcwData$mios_score[match(mios_temp$ID, hcwData$ID)] <- mios_temp$mios_score
+
+#test the results
+# test_MIOS<- hcwData %>% select(colnms_mios_14item, mios_rowMode, MIOStrust_rowMode, mios_score)
+
+```
+
+### Perform latent profile analysis on mios subscales
+```{r}
+
+mios_selection<-hcwData %>%select(MIOSshame_score, MIOStrust_score)
+
+#removing missing values
+subscales <- mios_selection[complete.cases(mios_selection), ]
+
+mios_profile1<-subscales %>% estimate_profiles(1:5 , variances = "equal" ,covariances = "zero")
+mios_profile1
+plot_profiles(mios_profile1)
+```
+
+```{r}
+
+# get the data set including the estimated profiles(classes)
+data_with_profiles<-mios_profile1$model_1_class_5$dff
+
+#merge subscales data with classes
+class_data<-data_with_profiles %>% select(Class)
+final_result_sub<- cbind(subscales, class_data)
+
+```
+
+
+### Perform latent profile analysis on 14 mios items 
+
+```{r}
+#select all mios items
+mios_temp1<-mios_temp %>%select(all_of(colnms_mios_14item))
+
+#removing missing values
+# df <- mios_temp[complete.cases(mios_temp), ]
+
+#perform latent profile analysis on 14 mios items   varying
+mios_profile2<-mios_temp1 %>% estimate_profiles(1:5 , variances = "equal" ,covariances = "zero")
+mios_profile2
+plot_profiles(mios_profile2)
+
+
+
+```
+
+
+
+```{r}
+
+# get the data set including the estimated profiles(classes)
+data_with_profiles<-mios_profile2$model_1_class_5$dff
+#merge miostemp data with classes
+class_data<-data_with_profiles %>% select(Class)
+final_result<- cbind(mios_temp, class_data)
+
+
+```
+
+
+### Appendix
+
+#### Entropy: A measure of classification uncertainty, reverse-coded so that 1 reflects complete certainty of classification, and 0 complete uncertainty.
+
+#### BLRT p-value: p-value for the bootstrapped likelihood ratio test.
+#### AIC: Aikake information criterion; based on -2 log-likelihood, and penalized by number of parameters.
+#### BIC: Bayesian information criterion; based on -2 log-likelihood, and penalized by number of parameters adjusted by sample size.
+
+#### Prob. Max.: Maximum of the diagonal of the average latent class probabilities for most likely class membership, by assigned class. The maximum should also be as high as possible, reflecting greater classification certainty (cases are assigned to classes they have a high probability of belonging to).
+#### N Min.: Proportion of the sample assigned to the smallest class (based on most likely class membership).
+#### N Max.: Proportion of the sample assigned to the largest class (based on most likely class membership).
